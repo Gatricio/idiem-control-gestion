@@ -2,6 +2,7 @@ import datetime
 import pandas as pd
 import streamlit as st
 import database as db
+from streamlit_oauth import OAuth2Component
 
 st.set_page_config(
     page_title="IDIEM - Control de Gestión & KPI",
@@ -21,22 +22,24 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Autenticación / Login
+# ---------------------------------------------------------
+# AUTENTICACIÓN GOOGLE OAUTH
+# ---------------------------------------------------------
+CLIENT_ID = st.secrets["google_oauth"]["client_id"]
+CLIENT_SECRET = st.secrets["google_oauth"]["client_secret"]
+REDIRECT_URI = st.secrets["google_oauth"]["redirect_uri"]
+
+oauth2 = OAuth2Component(
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
+    authorize_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+    token_endpoint="https://oauth2.googleapis.com/token",
+    refresh_token_endpoint="https://oauth2.googleapis.com/token",
+    revoke_token_endpoint="https://oauth2.googleapis.com/revoke"
+)
+
 if "user" not in st.session_state:
     st.session_state.user = None
-
-def login(email, password):
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    pwd_hash = db.hash_password(password)
-    cursor.execute("SELECT id, nombre, email, rol FROM usuarios WHERE email = ? AND password_hash = ?", (email, pwd_hash))
-    user = cursor.fetchone()
-    conn.close()
-    if user:
-        st.session_state.user = dict(user)
-        st.rerun()
-    else:
-        st.error("Credenciales incorrectas.")
 
 if not st.session_state.user:
     st.markdown('<div class="main-header">IDIEM — UNIVERSIDAD DE CHILE</div>', unsafe_allow_html=True)
@@ -44,19 +47,55 @@ if not st.session_state.user:
 
     col_a, col_b, col_c = st.columns([1, 2, 1])
     with col_b:
-        st.subheader("🔒 Iniciar Sesión")
-        email_in = st.text_input("Correo Institucional:")
-        pwd_in = st.text_input("Contraseña:", type="password")
-        if st.button("Ingresar al Sistema", use_container_width=True):
-            login(email_in, pwd_in)
+        st.subheader("🔒 Acceso Institucional")
+        st.caption("Ingresa con tu cuenta de correo corporativa IDIEM / Universidad de Chile.")
 
-        st.caption("👥 **Cuentas Demo:**")
-        st.caption("• **Gerencia:** gerencia@idiem.cl / gerencia123")
-        st.caption("• **Jefe de Proyecto:** jp.patricio@idiem.cl / jp123")
-        st.caption("• **Profesional:** carlos.prof@idiem.cl / prof123")
+        result = oauth2.authorize_button(
+            name="Iniciar sesión con Google IDIEM",
+            redirect_uri=REDIRECT_URI,
+            scope="openid email profile",
+            key="google_login",
+            use_container_width=True
+        )
+
+        if result and "token" in result:
+            import jwt
+            # Decodificar token de Google para extraer email y nombre
+            id_token = result["token"]["id_token"]
+            user_info = jwt.decode(id_token, options={"verify_signature": False})
+            
+            email_google = user_info.get("email", "").lower()
+            nombre_google = user_info.get("name", "Usuario IDIEM")
+
+            # Validar dominio institucional
+            if email_google.endswith("@idiem.cl") or email_google.endswith("@uchile.cl"):
+                conn = db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, nombre, email, rol FROM usuarios WHERE email = ?", (email_google,))
+                user_db = cursor.fetchone()
+
+                if user_db:
+                    st.session_state.user = dict(user_db)
+                else:
+                    # Asignación automática por defecto como Profesional si no está pre-registrado
+                    cursor.execute("""
+                        INSERT INTO usuarios (nombre, email, password_hash, rol)
+                        VALUES (?, ?, 'sso_google', 'Profesional')
+                    """, (nombre_google, email_google))
+                    conn.commit()
+                    
+                    cursor.execute("SELECT id, nombre, email, rol FROM usuarios WHERE email = ?", (email_google,))
+                    st.session_state.user = dict(cursor.fetchone())
+
+                conn.close()
+                st.rerun()
+            else:
+                st.error("⚠️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
     st.stop()
 
-# Barra lateral
+# ---------------------------------------------------------
+# BARRA LATERAL Y PERFIL ACTIVO
+# ---------------------------------------------------------
 usuario_actual = st.session_state.user
 
 with st.sidebar:
@@ -71,7 +110,9 @@ with st.sidebar:
 st.markdown('<div class="main-header">IDIEM — Control de Gestión de Ingeniería Contractual</div>', unsafe_allow_html=True)
 st.caption(f"Panel Operativo | Perfil Activo: {usuario_actual['rol']}")
 
+# =========================================================
 # VISTA 1: GERENCIA
+# =========================================================
 if usuario_actual['rol'] == "Gerencia":
     st.subheader("📈 Cuadro de Mando Ejecutivo (KPI Gerenciales)")
 
@@ -115,7 +156,9 @@ if usuario_actual['rol'] == "Gerencia":
             use_container_width=True
         )
 
+# =========================================================
 # VISTA 2: JEFE DE PROYECTO
+# =========================================================
 elif usuario_actual['rol'] == "Jefe de Proyecto":
     tab_mis_proyectos, tab_crear, tab_asignar = st.tabs([
         "📊 Mis Proyectos & Avance",
@@ -211,7 +254,9 @@ elif usuario_actual['rol'] == "Jefe de Proyecto":
 
     conn.close()
 
+# =========================================================
 # VISTA 3: PROFESIONAL
+# =========================================================
 elif usuario_actual['rol'] == "Profesional":
     st.subheader("⏱️ Registro Diario / Semanal de Horas Hombre (Timesheet)")
 
