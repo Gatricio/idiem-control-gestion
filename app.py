@@ -10,10 +10,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# Inicializar Base de Datos
 db.init_db()
 
-# Estilos corporativos IDIEM
 st.markdown("""
     <style>
     .main-header { font-size:24px; font-weight:bold; color:#002855; margin-bottom:2px; }
@@ -22,9 +20,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# AUTENTICACIÓN GOOGLE OAUTH
-# ---------------------------------------------------------
+# Autenticación Google OAuth
 CLIENT_ID = st.secrets["google_oauth"]["client_id"]
 CLIENT_SECRET = st.secrets["google_oauth"]["client_secret"]
 REDIRECT_URI = st.secrets["google_oauth"]["redirect_uri"]
@@ -60,31 +56,27 @@ if not st.session_state.user:
 
         if result and "token" in result:
             import jwt
-            # Decodificar token de Google para extraer email y nombre
             id_token = result["token"]["id_token"]
             user_info = jwt.decode(id_token, options={"verify_signature": False})
             
             email_google = user_info.get("email", "").lower()
             nombre_google = user_info.get("name", "Usuario IDIEM")
 
-            # Validar dominio institucional
             if email_google.endswith("@idiem.cl") or email_google.endswith("@uchile.cl"):
                 conn = db.get_connection()
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, nombre, email, rol FROM usuarios WHERE email = ?", (email_google,))
+                cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
                 user_db = cursor.fetchone()
 
                 if user_db:
                     st.session_state.user = dict(user_db)
                 else:
-                    # Asignación automática por defecto como Profesional si no está pre-registrado
                     cursor.execute("""
-                        INSERT INTO usuarios (nombre, email, password_hash, rol)
-                        VALUES (?, ?, 'sso_google', 'Profesional')
+                        INSERT INTO usuarios (nombre, email)
+                        VALUES (?, ?)
                     """, (nombre_google, email_google))
                     conn.commit()
-                    
-                    cursor.execute("SELECT id, nombre, email, rol FROM usuarios WHERE email = ?", (email_google,))
+                    cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
                     st.session_state.user = dict(cursor.fetchone())
 
                 conn.close()
@@ -93,14 +85,11 @@ if not st.session_state.user:
                 st.error("⚠️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
     st.stop()
 
-# ---------------------------------------------------------
-# BARRA LATERAL Y PERFIL ACTIVO
-# ---------------------------------------------------------
+# Barra Lateral
 usuario_actual = st.session_state.user
 
 with st.sidebar:
     st.markdown(f"👤 **{usuario_actual['nombre']}**")
-    st.caption(f"Rol: **{usuario_actual['rol']}**")
     st.caption(f"Email: {usuario_actual['email']}")
     st.markdown("---")
     if st.button("Cerrar Sesión", use_container_width=True):
@@ -108,30 +97,35 @@ with st.sidebar:
         st.rerun()
 
 st.markdown('<div class="main-header">IDIEM — Control de Gestión de Ingeniería Contractual</div>', unsafe_allow_html=True)
-st.caption(f"Panel Operativo | Perfil Activo: {usuario_actual['rol']}")
 
-# =========================================================
-# VISTA 1: GERENCIA
-# =========================================================
-if usuario_actual['rol'] == "Gerencia":
-    st.subheader("📈 Cuadro de Mando Ejecutivo (KPI Gerenciales)")
+# Pestañas Abiertas para Todos los Usuarios
+tab_kpi, tab_gestion, tab_asignar, tab_timesheet = st.tabs([
+    "📈 Cuadro de Mando & KPI",
+    "➕ Crear / Editar Proyectos",
+    "👥 Asignar Equipos & HH",
+    "⏱️ Registro de Horas (Timesheet)"
+])
 
-    conn = db.get_connection()
+conn = db.get_connection()
+
+# ---------------------------------------------------------
+# PESTAÑA 1: CUADRO DE MANDO & KPI
+# ---------------------------------------------------------
+with tab_kpi:
+    st.subheader("Estado Global de Proyectos")
 
     df_proyectos = pd.read_sql_query("""
-        SELECT p.id, p.codigo, p.nombre, p.cliente, u.nombre as jp, p.presupuesto_uf, 
+        SELECT p.id, p.codigo, p.nombre, p.cliente, u.nombre as responsable, p.presupuesto_uf, 
                p.hh_presupuestadas, p.fecha_inicio, p.fecha_fin, p.estado,
                COALESCE(SUM(r.hh_registradas), 0) as hh_ejecutadas
         FROM proyectos p
-        LEFT JOIN usuarios u ON p.jp_id = u.id
+        LEFT JOIN usuarios u ON p.responsable_id = u.id
         LEFT JOIN registro_horas r ON p.id = r.proyecto_id
         GROUP BY p.id
     """, conn)
 
-    conn.close()
-
     if df_proyectos.empty:
-        st.info("No hay proyectos registrados aún en la base de datos.")
+        st.info("No hay proyectos registrados en el sistema.")
     else:
         total_proyectos = len(df_proyectos)
         total_uf = df_proyectos['presupuesto_uf'].sum()
@@ -143,124 +137,108 @@ if usuario_actual['rol'] == "Gerencia":
         m1.metric("Proyectos Activos", f"{total_proyectos}")
         m2.metric("Monto Cartera Total", f"UF {total_uf:,.1f}")
         m3.metric("HH Presupuestadas", f"{total_hh_plan:,.0f} HH")
-        m4.metric("Consumo HH Global", f"{total_hh_real:,.1f} HH", f"{avance_hh_pct:.1f}% del Total")
+        m4.metric("Consumo HH Global", f"{total_hh_real:,.1f} HH", f"{avance_hh_pct:.1f}%")
 
         st.markdown("---")
-        st.markdown("### 🔍 Estado Detallado por Proyecto")
-
         df_proyectos['Avance HH %'] = (df_proyectos['hh_ejecutadas'] / df_proyectos['hh_presupuestadas'] * 100).round(1)
         df_proyectos['HH Disponibles'] = df_proyectos['hh_presupuestadas'] - df_proyectos['hh_ejecutadas']
 
         st.dataframe(
-            df_proyectos[['codigo', 'nombre', 'cliente', 'jp', 'presupuesto_uf', 'hh_presupuestadas', 'hh_ejecutadas', 'HH Disponibles', 'Avance HH %', 'estado']],
+            df_proyectos[['codigo', 'nombre', 'cliente', 'responsable', 'presupuesto_uf', 'hh_presupuestadas', 'hh_ejecutadas', 'HH Disponibles', 'Avance HH %', 'estado']],
             use_container_width=True
         )
 
-# =========================================================
-# VISTA 2: JEFE DE PROYECTO
-# =========================================================
-elif usuario_actual['rol'] == "Jefe de Proyecto":
-    tab_mis_proyectos, tab_crear, tab_asignar = st.tabs([
-        "📊 Mis Proyectos & Avance",
-        "➕ Crear Nuevo Proyecto",
-        "👥 Asignar Equipo & HH"
-    ])
+        st.markdown("---")
+        st.markdown("##### 🗑️ Eliminar Proyecto")
+        dict_del_p = {f"{r['codigo']} - {r['nombre']}": r['id'] for _, r in df_proyectos.iterrows()}
+        p_to_del = st.selectbox("Seleccionar Proyecto para Eliminar:", list(dict_del_p.keys()), key="del_p_select")
+        if st.button("Eliminar Proyecto Seleccionado", type="secondary"):
+            cursor = conn.cursor()
+            p_id = dict_del_p[p_to_del]
+            cursor.execute("DELETE FROM registro_horas WHERE proyecto_id = ?", (p_id,))
+            cursor.execute("DELETE FROM asignaciones WHERE proyecto_id = ?", (p_id,))
+            cursor.execute("DELETE FROM proyectos WHERE id = ?", (p_id,))
+            conn.commit()
+            st.success("Proyecto y sus registros eliminados correctamente.")
+            st.rerun()
 
-    conn = db.get_connection()
+# ---------------------------------------------------------
+# PESTAÑA 2: CREAR / EDITAR PROYECTOS
+# ---------------------------------------------------------
+with tab_gestion:
+    st.subheader("Crear Nuevo Proyecto")
+    with st.form("form_crear_proyecto"):
+        col1, col2 = st.columns(2)
+        with col1:
+            cod_in = st.text_input("Código de Propuesta (PR.DIC):", placeholder="PR.DIC-2026-X")
+            nom_in = st.text_input("Nombre del Proyecto/Peritaje:")
+            cli_in = st.text_input("Cliente / Tribunal Arbitral:")
+        with col2:
+            uf_in = st.number_input("Presupuesto Total (UF):", min_value=1.0, value=100.0, step=10.0)
+            hh_in = st.number_input("Horas Hombre Presupuestadas:", min_value=1, value=150)
+            f_ini = st.date_input("Fecha Inicio:", value=datetime.date.today())
+            f_fin = st.date_input("Fecha Estimada Término:", value=datetime.date.today() + datetime.timedelta(days=90))
 
-    with tab_mis_proyectos:
-        st.subheader("Proyectos Bajo mi Gestión")
-        df_mis_p = pd.read_sql_query("""
-            SELECT p.id, p.codigo, p.nombre, p.cliente, p.presupuesto_uf, p.hh_presupuestadas,
-                   COALESCE(SUM(r.hh_registradas), 0) as hh_ejecutadas
-            FROM proyectos p
-            LEFT JOIN registro_horas r ON p.id = r.proyecto_id
-            WHERE p.jp_id = ?
-            GROUP BY p.id
-        """, conn, params=(usuario_actual['id'],))
+        btn_crear = st.form_submit_button("Guardar Proyecto")
 
-        if df_mis_p.empty:
-            st.info("No tienes proyectos asignados como Jefe de Proyecto.")
-        else:
-            df_mis_p['HH Restantes'] = df_mis_p['hh_presupuestadas'] - df_mis_p['hh_ejecutadas']
-            df_mis_p['% Consumido'] = (df_mis_p['hh_ejecutadas'] / df_mis_p['hh_presupuestadas'] * 100).round(1)
-            st.dataframe(df_mis_p, use_container_width=True)
-
-    with tab_crear:
-        st.subheader("Ingreso de Nuevo Proyecto al Sistema")
-        with st.form("form_crear_proyecto"):
-            col1, col2 = st.columns(2)
-            with col1:
-                cod_in = st.text_input("Código de Propuesta (PR.DIC):", placeholder="PR.DIC-2026-X")
-                nom_in = st.text_input("Nombre Oficial del Proyecto/Peritaje:")
-                cli_in = st.text_input("Cliente / Tribunal Arbitral:")
-            with col2:
-                uf_in = st.number_input("Presupuesto Total (UF):", min_value=1.0, value=100.0, step=10.0)
-                hh_in = st.number_input("Horas Hombre Totales Presupuestadas:", min_value=1, value=150)
-                f_ini = st.date_input("Fecha Inicio:", value=datetime.date.today())
-                f_fin = st.date_input("Fecha Estimada Término:", value=datetime.date.today() + datetime.timedelta(days=90))
-
-            btn_crear = st.form_submit_button("Guardar y Registrar Proyecto")
-
-            if btn_crear:
-                if cod_in.strip() and nom_in.strip() and cli_in.strip():
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            INSERT INTO proyectos (codigo, nombre, cliente, jp_id, presupuesto_uf, hh_presupuestadas, fecha_inicio, fecha_fin)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (cod_in.strip(), nom_in.strip(), cli_in.strip(), usuario_actual['id'], uf_in, hh_in, f_ini, f_fin))
-                        conn.commit()
-                        st.success(f"¡Proyecto '{cod_in}' registrado exitosamente!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error al registrar proyecto: {e}")
-                else:
-                    st.warning("Por favor completa todos los campos requeridos.")
-
-    with tab_asignar:
-        st.subheader("Asignación de Profesionales a Proyectos")
-
-        proyectos_jp = pd.read_sql_query("SELECT id, codigo, nombre FROM proyectos WHERE jp_id = ?", conn, params=(usuario_actual['id'],))
-        profesionales = pd.read_sql_query("SELECT id, nombre, email FROM usuarios WHERE rol = 'Profesional'", conn)
-
-        if proyectos_jp.empty:
-            st.info("Primero debes crear un proyecto para asignarle profesionales.")
-        elif profesionales.empty:
-            st.info("No hay profesionales registrados en el sistema.")
-        else:
-            dict_proyectos = {f"{r['codigo']} - {r['nombre']}": r['id'] for _, r in proyectos_jp.iterrows()}
-            dict_profesional = {f"{r['nombre']} ({r['email']})": r['id'] for _, r in profesionales.iterrows()}
-
-            sel_p = st.selectbox("Seleccionar Proyecto:", list(dict_proyectos.keys()))
-            sel_prof = st.selectbox("Seleccionar Profesional de Asesoría:", list(dict_profesional.keys()))
-            hh_asign = st.number_input("Horas Asignadas para el Período/Mes:", min_value=1, value=40)
-
-            if st.button("Asignar Profesional al Proyecto"):
-                p_id = dict_proyectos[sel_p]
-                u_id = dict_profesional[sel_prof]
-
+        if btn_crear:
+            if cod_in.strip() and nom_in.strip() and cli_in.strip():
                 try:
                     cursor = conn.cursor()
                     cursor.execute("""
-                        INSERT INTO asignaciones (proyecto_id, usuario_id, hh_asignadas)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(proyecto_id, usuario_id) DO UPDATE SET hh_asignadas = ?
-                    """, (p_id, u_id, hh_asign, hh_asign))
+                        INSERT INTO proyectos (codigo, nombre, cliente, responsable_id, presupuesto_uf, hh_presupuestadas, fecha_inicio, fecha_fin)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (cod_in.strip(), nom_in.strip(), cli_in.strip(), usuario_actual['id'], uf_in, hh_in, f_ini, f_fin))
                     conn.commit()
-                    st.success("¡Asignación guardada correctamente!")
+                    st.success(f"¡Proyecto '{cod_in}' registrado exitosamente!")
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"Error en la asignación: {e}")
+                    st.error(f"Error al registrar proyecto: {e}")
+            else:
+                st.warning("Completa los campos obligatorios.")
 
-    conn.close()
+# ---------------------------------------------------------
+# PESTAÑA 3: ASIGNAR EQUIPOS & HH
+# ---------------------------------------------------------
+with tab_asignar:
+    st.subheader("Asignación de Profesionales a Proyectos")
 
-# =========================================================
-# VISTA 3: PROFESIONAL
-# =========================================================
-elif usuario_actual['rol'] == "Profesional":
-    st.subheader("⏱️ Registro Diario / Semanal de Horas Hombre (Timesheet)")
+    proyectos_all = pd.read_sql_query("SELECT id, codigo, nombre FROM proyectos", conn)
+    usuarios_all = pd.read_sql_query("SELECT id, nombre, email FROM usuarios", conn)
 
-    conn = db.get_connection()
+    if proyectos_all.empty:
+        st.info("Primero debes registrar un proyecto.")
+    elif usuarios_all.empty:
+        st.info("No hay usuarios registrados en el sistema.")
+    else:
+        dict_proyectos = {f"{r['codigo']} - {r['nombre']}": r['id'] for _, r in proyectos_all.iterrows()}
+        dict_usuarios = {f"{r['nombre']} ({r['email']})": r['id'] for _, r in usuarios_all.iterrows()}
+
+        sel_p = st.selectbox("Seleccionar Proyecto:", list(dict_proyectos.keys()), key="asig_p")
+        sel_u = st.selectbox("Seleccionar Profesional a Asignar:", list(dict_usuarios.keys()), key="asig_u")
+        hh_asign = st.number_input("Horas Asignadas (HH):", min_value=1, value=40)
+
+        if st.button("Guardar Asignación"):
+            p_id = dict_proyectos[sel_p]
+            u_id = dict_usuarios[sel_u]
+
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO asignaciones (proyecto_id, usuario_id, hh_asignadas)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(proyecto_id, usuario_id) DO UPDATE SET hh_asignadas = ?
+                """, (p_id, u_id, hh_asign, hh_asign))
+                conn.commit()
+                st.success("¡Asignación guardada correctamente!")
+            except Exception as e:
+                st.error(f"Error en la asignación: {e}")
+
+# ---------------------------------------------------------
+# PESTAÑA 4: REGISTRO DE HORAS (TIMESHEET)
+# ---------------------------------------------------------
+with tab_timesheet:
+    st.subheader("Carga Diario / Semanal de Horas Hombre")
 
     mis_asignaciones = pd.read_sql_query("""
         SELECT p.id, p.codigo, p.nombre, a.hh_asignadas,
@@ -273,14 +251,13 @@ elif usuario_actual['rol'] == "Profesional":
     """, conn, params=(usuario_actual['id'],))
 
     if mis_asignaciones.empty:
-        st.info("No tienes proyectos asignados actualmente.")
+        st.info("No tienes asignaciones de horas activas. Puedes asignarte horas en la pestaña 'Asignar Equipos & HH'.")
     else:
-        st.markdown("#### Mis Asignaciones Activas")
         mis_asignaciones['HH Pendientes'] = mis_asignaciones['hh_asignadas'] - mis_asignaciones['hh_cargadas']
         st.dataframe(mis_asignaciones[['codigo', 'nombre', 'hh_asignadas', 'hh_cargadas', 'HH Pendientes']], use_container_width=True)
 
         st.markdown("---")
-        st.markdown("#### Cargar Horas Trabajadas")
+        st.markdown("#### Registrar Horas")
 
         dict_mis_p = {f"{r['codigo']} - {r['nombre']}": r['id'] for _, r in mis_asignaciones.iterrows()}
 
@@ -290,7 +267,7 @@ elif usuario_actual['rol'] == "Profesional":
             hh_reg = st.number_input("Horas Trabajadas (HH):", min_value=0.5, max_value=12.0, value=2.0, step=0.5)
             act_reg = st.text_area("Descripción de la Actividad / Avance:", placeholder="Ej: Revisión de Libro de Obras...")
 
-            btn_cargar = st.form_submit_button("Registrar Horas en el Proyecto")
+            btn_cargar = st.form_submit_button("Registrar Horas")
 
             if btn_cargar:
                 if act_reg.strip():
@@ -300,9 +277,9 @@ elif usuario_actual['rol'] == "Profesional":
                         VALUES (?, ?, ?, ?, ?)
                     """, (dict_mis_p[p_sel_name], usuario_actual['id'], fecha_reg, hh_reg, act_reg.strip()))
                     conn.commit()
-                    st.success("¡Horas registradas correctamente!")
+                    st.success("¡Horas registradas!")
                     st.rerun()
                 else:
-                    st.warning("Por favor describe la actividad realizada.")
+                    st.warning("Por favor describe la actividad.")
 
-    conn.close()
+conn.close()
