@@ -11,8 +11,10 @@ st.set_page_config(
     layout="wide"
 )
 
+# Inicializar Base de Datos
 db.init_db()
 
+# Estilos corporativos IDIEM
 st.markdown("""
     <style>
     .main-header { font-size:24px; font-weight:bold; color:#002855; margin-bottom:2px; }
@@ -35,16 +37,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# AUTENTICACIÓN GOOGLE OAUTH NATIVA (SIN EXPIRACIÓN DE STATE)
+# AUTENTICACIÓN GOOGLE OAUTH NATIVA (CON LECTURA SEGURA DE SECRETS)
 # ---------------------------------------------------------
-CLIENT_ID = st.secrets["google_oauth"]["client_id"]
-CLIENT_SECRET = st.secrets["google_oauth"]["client_secret"]
-REDIRECT_URI = st.secrets["google_oauth"]["redirect_uri"]
+oauth_config = st.secrets.get("google_oauth", {})
+CLIENT_ID = oauth_config.get("client_id", "")
+CLIENT_SECRET = oauth_config.get("client_secret", "")
+REDIRECT_URI = oauth_config.get("redirect_uri", "https://idiem-control-gestion-7x2kahu8azb7urmxcjcpg2.streamlit.app")
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# Procesar retorno desde Google
+# Procesar código devuelto por Google
 query_params = st.query_params
 if "code" in query_params and not st.session_state.user:
     auth_code = query_params["code"]
@@ -70,6 +73,7 @@ if "code" in query_params and not st.session_state.user:
         email_google = user_info.get("email", "").lower()
         nombre_google = user_info.get("name", "Usuario IDIEM")
 
+        # Validar dominio corporativo
         if email_google.endswith("@idiem.cl") or email_google.endswith("@uchile.cl"):
             conn = db.get_connection()
             cursor = conn.cursor()
@@ -87,7 +91,7 @@ if "code" in query_params and not st.session_state.user:
             conn.close()
             st.rerun()
         else:
-            st.error("⚠️️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
+            st.error("⚠️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
 
 # Pantalla de Login
 if not st.session_state.user:
@@ -99,13 +103,14 @@ if not st.session_state.user:
         st.subheader("🔒 Acceso Institucional")
         st.caption("Ingresa con tu cuenta de correo corporativa IDIEM / Universidad de Chile.")
 
+        # URL de autenticación limpia con parámetros OAuth 2.0 estándar
         google_auth_url = (
             "https://accounts.google.com/o/oauth2/v2/auth?"
             f"client_id={CLIENT_ID}&"
             f"redirect_uri={urllib.parse.quote(REDIRECT_URI, safe='')}&"
             "response_type=code&"
             "scope=openid%20email%20profile&"
-            "prompt=select_account"
+            "access_type=online"
         )
 
         st.markdown(f'<a href="{google_auth_url}" target="_self" class="login-btn">🔑 Iniciar sesión con Google IDIEM</a>', unsafe_allow_html=True)
