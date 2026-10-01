@@ -11,7 +11,18 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Tabla Usuarios (sin restricciones de rol)
+    # Verificar si la tabla proyectos usa la columna antigua jp_id
+    cursor.execute("PRAGMA table_info(proyectos)")
+    columns = [col[1] for col in cursor.fetchall()]
+
+    # Si la tabla existe con el esquema viejo, la eliminamos para actualizar el esquema
+    if "jp_id" in columns:
+        cursor.execute("DROP TABLE IF EXISTS registro_horas")
+        cursor.execute("DROP TABLE IF EXISTS asignaciones")
+        cursor.execute("DROP TABLE IF EXISTS proyectos")
+        cursor.execute("DROP TABLE IF EXISTS usuarios")
+
+    # Tabla Usuarios
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +55,7 @@ def init_db():
             proyecto_id INTEGER NOT NULL,
             usuario_id INTEGER NOT NULL,
             hh_asignadas INTEGER NOT NULL,
-            FOREIGN KEY (proyecto_id) REFERENCES usuarios (id),
+            FOREIGN KEY (proyecto_id) REFERENCES proyectos (id),
             FOREIGN KEY (usuario_id) REFERENCES usuarios (id),
             UNIQUE(proyecto_id, usuario_id)
         )
@@ -59,7 +70,7 @@ def init_db():
             fecha DATE NOT NULL,
             hh_registradas REAL NOT NULL,
             actividad TEXT NOT NULL,
-            FOREIGN KEY (proyecto_id) REFERENCES usuarios (id),
+            FOREIGN KEY (proyecto_id) REFERENCES proyectos (id),
             FOREIGN KEY (usuario_id) REFERENCES usuarios (id)
         )
     """)
