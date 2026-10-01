@@ -1,8 +1,9 @@
 import datetime
+import urllib.parse
 import pandas as pd
+import requests
 import streamlit as st
 import database as db
-from streamlit_oauth import OAuth2Component
 
 st.set_page_config(
     page_title="IDIEM - Control de Gestión & KPI",
@@ -17,26 +18,78 @@ st.markdown("""
     .main-header { font-size:24px; font-weight:bold; color:#002855; margin-bottom:2px; }
     .sub-header { font-size:14px; color:#555; margin-bottom: 20px; }
     .stMetric { background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 4px solid #0056B3; }
+    .login-btn {
+        display: inline-block;
+        width: 100%;
+        text-align: center;
+        background-color: #002855;
+        color: white !important;
+        padding: 12px;
+        border-radius: 6px;
+        font-weight: bold;
+        text-decoration: none;
+        margin-top: 10px;
+    }
+    .login-btn:hover { background-color: #004080; }
     </style>
 """, unsafe_allow_html=True)
 
-# Autenticación Google OAuth
+# ---------------------------------------------------------
+# AUTENTICACIÓN GOOGLE OAUTH NATIVA (SIN EXPIRACIÓN DE STATE)
+# ---------------------------------------------------------
 CLIENT_ID = st.secrets["google_oauth"]["client_id"]
 CLIENT_SECRET = st.secrets["google_oauth"]["client_secret"]
 REDIRECT_URI = st.secrets["google_oauth"]["redirect_uri"]
 
-oauth2 = OAuth2Component(
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    authorize_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
-    token_endpoint="https://oauth2.googleapis.com/token",
-    refresh_token_endpoint="https://oauth2.googleapis.com/token",
-    revoke_token_endpoint="https://oauth2.googleapis.com/revoke"
-)
-
 if "user" not in st.session_state:
     st.session_state.user = None
 
+# Procesar retorno desde Google
+query_params = st.query_params
+if "code" in query_params and not st.session_state.user:
+    auth_code = query_params["code"]
+    st.query_params.clear()
+
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": auth_code,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+
+    res = requests.post(token_url, data=data)
+    if res.status_code == 200:
+        tokens = res.json()
+        id_token = tokens.get("id_token")
+
+        import jwt
+        user_info = jwt.decode(id_token, options={"verify_signature": False})
+
+        email_google = user_info.get("email", "").lower()
+        nombre_google = user_info.get("name", "Usuario IDIEM")
+
+        if email_google.endswith("@idiem.cl") or email_google.endswith("@uchile.cl"):
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
+            user_db = cursor.fetchone()
+
+            if user_db:
+                st.session_state.user = dict(user_db)
+            else:
+                cursor.execute("INSERT INTO usuarios (nombre, email) VALUES (?, ?)", (nombre_google, email_google))
+                conn.commit()
+                cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
+                st.session_state.user = dict(cursor.fetchone())
+
+            conn.close()
+            st.rerun()
+        else:
+            st.error("⚠️️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
+
+# Pantalla de Login
 if not st.session_state.user:
     st.markdown('<div class="main-header">IDIEM — UNIVERSIDAD DE CHILE</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">División de Ingeniería Contractual | Portal de Control de Gestión</div>', unsafe_allow_html=True)
@@ -46,46 +99,21 @@ if not st.session_state.user:
         st.subheader("🔒 Acceso Institucional")
         st.caption("Ingresa con tu cuenta de correo corporativa IDIEM / Universidad de Chile.")
 
-        result = oauth2.authorize_button(
-            name="Iniciar sesión con Google IDIEM",
-            redirect_uri=REDIRECT_URI,
-            scope="openid email profile",
-            key="google_login",
-            use_container_width=True
+        google_auth_url = (
+            "https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={CLIENT_ID}&"
+            f"redirect_uri={urllib.parse.quote(REDIRECT_URI, safe='')}&"
+            "response_type=code&"
+            "scope=openid%20email%20profile&"
+            "prompt=select_account"
         )
 
-        if result and "token" in result:
-            import jwt
-            id_token = result["token"]["id_token"]
-            user_info = jwt.decode(id_token, options={"verify_signature": False})
-            
-            email_google = user_info.get("email", "").lower()
-            nombre_google = user_info.get("name", "Usuario IDIEM")
-
-            if email_google.endswith("@idiem.cl") or email_google.endswith("@uchile.cl"):
-                conn = db.get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
-                user_db = cursor.fetchone()
-
-                if user_db:
-                    st.session_state.user = dict(user_db)
-                else:
-                    cursor.execute("""
-                        INSERT INTO usuarios (nombre, email)
-                        VALUES (?, ?)
-                    """, (nombre_google, email_google))
-                    conn.commit()
-                    cursor.execute("SELECT id, nombre, email FROM usuarios WHERE email = ?", (email_google,))
-                    st.session_state.user = dict(cursor.fetchone())
-
-                conn.close()
-                st.rerun()
-            else:
-                st.error("⚠️ Acceso denegado: Solo se permiten cuentas corporativas @idiem.cl o @uchile.cl.")
+        st.markdown(f'<a href="{google_auth_url}" target="_self" class="login-btn">🔑 Iniciar sesión con Google IDIEM</a>', unsafe_allow_html=True)
     st.stop()
 
-# Barra Lateral
+# ---------------------------------------------------------
+# BARRA LATERAL Y PERFIL ACTIVO
+# ---------------------------------------------------------
 usuario_actual = st.session_state.user
 
 with st.sidebar:
