@@ -59,7 +59,7 @@ def init_db():
             fecha DATE NOT NULL,
             hh_registradas REAL NOT NULL,
             actividad TEXT NOT NULL,
-            FOREIGN KEY (proyecto_id) REFERENCES proyectos (id),
+            FOREIGN KEY (proyecto_id) REFERENCES usuarios (id),
             FOREIGN KEY (usuario_id) REFERENCES usuarios (id)
         )
     """)
